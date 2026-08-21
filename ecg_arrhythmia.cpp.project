@@ -1,0 +1,248 @@
+/*
+    ECG Arrhythmia Pattern Detection (Beginner C++ Version)
+    =========================================================
+    Author: Syeda Lubaba Zainab
+
+    What this program does:
+    1. Reads real ECG data (from PhysioNet's MIT-BIH Arrhythmia Database,
+       record 100) out of a CSV file.
+    2. Smooths the signal to reduce noise.
+    3. Finds heartbeats (R-peaks) by looking for tall spikes.
+    4. Measures the time gap between each heartbeat (RR interval).
+    5. Flags any beat that comes unusually early (a simple sign of an
+       irregular / "premature" heartbeat, seen in arrhythmias).
+    6. Prints a summary and saves the results to a CSV file.
+
+    This is written with basic C++ only: vectors, loops, functions,
+    and file streams -- no advanced classes or libraries needed.
+*/
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <vector>
+#include <string>
+#include <cmath>
+
+using namespace std;
+
+const int SAMPLING_RATE = 360;  // samples per second (Hz), fixed by the dataset
+
+// ---------------------------------------------------------------------
+// Step 1: Read the ECG signal values from the CSV file
+// ---------------------------------------------------------------------
+vector<double> readECGFromCSV(const string& filename) {
+    vector<double> signal;
+    ifstream file(filename);
+
+    if (!file.is_open()) {
+        cout << "ERROR: Could not open file " << filename << endl;
+        return signal;  // empty vector
+    }
+
+    string line;
+    getline(file, line);  // skip the header row ("SampleIndex,MLII")
+
+    while (getline(file, line)) {
+        stringstream ss(line);
+        string indexStr, valueStr;
+
+        getline(ss, indexStr, ',');   // first column: sample index (we don't need it)
+        getline(ss, valueStr, ',');   // second column: the ECG value we DO need
+
+        if (!valueStr.empty()) {
+            double value = stod(valueStr);  // convert text to a number
+            signal.push_back(value);
+        }
+    }
+
+    file.close();
+    return signal;
+}
+
+// ---------------------------------------------------------------------
+// Step 2: Smooth the signal using a simple moving average.
+// This averages each point with its nearby neighbors, which reduces
+// small noise spikes while keeping the big heartbeat spikes visible.
+// ---------------------------------------------------------------------
+vector<double> smoothSignal(const vector<double>& signal, int windowSize) {
+    vector<double> smoothed(signal.size(), 0.0);
+
+    for (int i = 0; i < (int)signal.size(); i++) {
+        int start = max(0, i - windowSize / 2);
+        int end = min((int)signal.size() - 1, i + windowSize / 2);
+
+        double sum = 0.0;
+        int count = 0;
+        for (int j = start; j <= end; j++) {
+            sum += signal[j];
+            count++;
+        }
+        smoothed[i] = sum / count;
+    }
+
+    return smoothed;
+}
+
+// ---------------------------------------------------------------------
+// Step 3: Find R-peaks (heartbeats) in the signal.
+// A point counts as a peak if:
+//   - it is taller than a threshold value, AND
+//   - it is taller than the points right next to it (a local maximum), AND
+//   - it is far enough away from the last peak we found (so we don't
+//     count the same heartbeat twice)
+// ---------------------------------------------------------------------
+vector<int> detectRPeaks(const vector<double>& signal, double threshold) {
+    vector<int> peaks;
+    int minDistance = (int)(0.3 * SAMPLING_RATE);  // beats can't be < 0.3s apart
+    // (0.3s apart = max physically possible heart rate of ~200 beats/min)
+
+    int lastPeakIndex = -minDistance;  // so the very first peak is always allowed
+
+    for (int i = 1; i < (int)signal.size() - 1; i++) {
+        bool isTallEnough = signal[i] > threshold;
+        bool isLocalMax = (signal[i] > signal[i - 1]) && (signal[i] > signal[i + 1]);
+        bool isFarEnough = (i - lastPeakIndex) >= minDistance;
+
+        if (isTallEnough && isLocalMax && isFarEnough) {
+            peaks.push_back(i);
+            lastPeakIndex = i;
+        }
+    }
+
+    return peaks;
+}
+
+// ---------------------------------------------------------------------
+// Step 4: Calculate the time gap (in seconds) between each pair of
+// consecutive heartbeats. This is called the "RR interval."
+// ---------------------------------------------------------------------
+vector<double> calculateRRIntervals(const vector<int>& peaks) {
+    vector<double> rrIntervals;
+
+    for (int i = 1; i < (int)peaks.size(); i++) {
+        int sampleGap = peaks[i] - peaks[i - 1];
+        double secondsGap = (double)sampleGap / SAMPLING_RATE;
+        rrIntervals.push_back(secondsGap);
+    }
+
+    return rrIntervals;
+}
+
+// ---------------------------------------------------------------------
+// Step 5: Flag beats that come unusually early.
+// We compare each RR interval to the average of the last few intervals.
+// If a beat comes much sooner than expected, it's flagged as "premature."
+// ---------------------------------------------------------------------
+vector<bool> flagPrematureBeats(const vector<double>& rrIntervals, double ratioThreshold) {
+    vector<bool> flags(rrIntervals.size(), false);
+    int lookback = 5;  // how many previous beats to average over
+
+    for (int i = 1; i < (int)rrIntervals.size(); i++) {
+        int start = max(0, i - lookback);
+
+        double sum = 0.0;
+        int count = 0;
+        for (int j = start; j < i; j++) {
+            sum += rrIntervals[j];
+            count++;
+        }
+        double localAverage = (count > 0) ? (sum / count) : rrIntervals[i];
+
+        if (rrIntervals[i] < ratioThreshold * localAverage) {
+            flags[i] = true;
+        }
+    }
+
+    return flags;
+}
+
+// ---------------------------------------------------------------------
+// Step 6: Save the results (peak positions + which ones were flagged)
+// to an output CSV file, so they can be checked or graphed later.
+// ---------------------------------------------------------------------
+void saveResultsToCSV(const string& filename, const vector<int>& peaks,
+                       const vector<double>& rrIntervals, const vector<bool>& flags) {
+    ofstream outFile(filename);
+    outFile << "BeatNumber,SampleIndex,TimeSeconds,RRInterval,Flagged\n";
+
+    for (int i = 0; i < (int)peaks.size(); i++) {
+        double timeSec = (double)peaks[i] / SAMPLING_RATE;
+        double rr = (i == 0) ? 0.0 : rrIntervals[i - 1];
+        bool flagged = (i == 0) ? false : flags[i - 1];
+
+        outFile << i << "," << peaks[i] << "," << timeSec << ","
+                << rr << "," << (flagged ? "YES" : "no") << "\n";
+    }
+
+    outFile.close();
+}
+
+// ---------------------------------------------------------------------
+// Main program
+// ---------------------------------------------------------------------
+int main() {
+    cout << "=======================================" << endl;
+    cout << " ECG Arrhythmia Pattern Detection" << endl;
+    cout << " Author: Syeda Lubaba Zainab" << endl;
+    cout << "=======================================" << endl << endl;
+
+    // --- Step 1: Load the data ---
+    string inputFile = "data/ecg_data.csv";
+    vector<double> rawSignal = readECGFromCSV(inputFile);
+
+    if (rawSignal.empty()) {
+        cout << "No data was loaded. Please check the file path: " << inputFile << endl;
+        return 1;
+    }
+    cout << "Loaded " << rawSignal.size() << " ECG samples from " << inputFile << endl;
+
+    // --- Step 2: Smooth the signal ---
+    vector<double> smoothed = smoothSignal(rawSignal, 5);
+    cout << "Signal smoothed to reduce noise." << endl;
+
+    // --- Step 3: Detect heartbeats ---
+    double peakThreshold = 0.4;  // adjust this if beats aren't being detected properly
+    vector<int> peaks = detectRPeaks(smoothed, peakThreshold);
+    cout << "Detected " << peaks.size() << " heartbeats." << endl;
+
+    if (peaks.size() < 2) {
+        cout << "Not enough heartbeats detected to analyze. Try lowering peakThreshold." << endl;
+        return 1;
+    }
+
+    // --- Step 4: Calculate RR intervals ---
+    vector<double> rrIntervals = calculateRRIntervals(peaks);
+
+    double sumRR = 0.0;
+    for (double rr : rrIntervals) sumRR += rr;
+    double avgRR = sumRR / rrIntervals.size();
+    double avgHeartRate = 60.0 / avgRR;
+
+    cout << "Average heart rate: " << avgHeartRate << " beats per minute" << endl;
+
+    // --- Step 5: Flag premature beats ---
+    double ratioThreshold = 0.85;
+    vector<bool> flags = flagPrematureBeats(rrIntervals, ratioThreshold);
+
+    int flaggedCount = 0;
+    for (bool f : flags) if (f) flaggedCount++;
+
+    cout << "Flagged " << flaggedCount << " beat(s) as possibly premature." << endl;
+
+    cout << endl << "Details of flagged beats:" << endl;
+    for (int i = 0; i < (int)flags.size(); i++) {
+        if (flags[i]) {
+            double timeSec = (double)peaks[i + 1] / SAMPLING_RATE;
+            cout << "  - Beat #" << (i + 1) << " at t = " << timeSec
+                 << "s (RR interval = " << rrIntervals[i] << "s)" << endl;
+        }
+    }
+
+    // --- Step 6: Save results ---
+    string outputFile = "output/results.csv";
+    saveResultsToCSV(outputFile, peaks, rrIntervals, flags);
+    cout << endl << "Results saved to " << outputFile << endl;
+
+    return 0;
+}
