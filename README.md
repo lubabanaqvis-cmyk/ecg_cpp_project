@@ -59,7 +59,7 @@ labeled by a cardiologist in the original dataset at the same location
   sooner than expected (less than 85% of the recent average gap), it's
   flagged as possibly premature.
 
-## Limitations (be ready to mention these if asked)
+## Limitations
 
 - Only tested on a 20-second segment of one recording — not validated
   across the full dataset or noisier recordings.
